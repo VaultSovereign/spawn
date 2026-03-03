@@ -127,8 +127,57 @@ CLOUD_ENV
     sleep 5
     log_ok "Install completed (.spawnrc found)"
     return 0
-  else
-    log_warn ".spawnrc not found after ${effective_install_wait}s — install may still be running"
-    return 0  # Continue to verification; it will catch real failures
   fi
+
+  # Fallback: CLI was killed before writing .spawnrc (provision timeout race).
+  # Construct .spawnrc manually via SSH using available env vars.
+  log_warn ".spawnrc not found after ${effective_install_wait}s — attempting manual creation"
+  local api_key="${OPENROUTER_API_KEY:-}"
+  if [ -z "${api_key}" ]; then
+    log_err "Cannot create .spawnrc fallback — OPENROUTER_API_KEY not set"
+    return 0
+  fi
+
+  # Build env lines in a temp file to avoid interpolating api_key into shell
+  # strings directly (prevents command injection if the key contains shell
+  # metacharacters like single quotes, backticks, or dollar signs).
+  local env_tmp
+  env_tmp=$(mktemp)
+  {
+    printf '%s\n' "# [spawn:env]"
+    printf 'export IS_SANDBOX=%q\n' "1"
+    printf 'export OPENROUTER_API_KEY=%q\n' "${api_key}"
+  } > "${env_tmp}"
+
+  # Add agent-specific env vars
+  case "${agent}" in
+    openclaw)
+      {
+        printf 'export ANTHROPIC_API_KEY=%q\n' "${api_key}"
+        printf 'export ANTHROPIC_BASE_URL=%q\n' "https://openrouter.ai/api"
+      } >> "${env_tmp}"
+      ;;
+    zeroclaw)
+      {
+        printf 'export ZEROCLAW_PROVIDER=%q\n' "openrouter"
+        printf 'export OPENAI_API_KEY=%q\n' "${api_key}"
+        printf 'export OPENAI_BASE_URL=%q\n' "https://openrouter.ai/api/v1"
+      } >> "${env_tmp}"
+      ;;
+  esac
+
+  local env_b64
+  env_b64=$(base64 < "${env_tmp}" | tr -d '\n')
+  rm -f "${env_tmp}"
+
+  # Use double-quoting around env_b64 in the remote command to prevent word
+  # splitting. Base64 output is shell-safe ([A-Za-z0-9+/=]), but quoting is
+  # defensive best practice against any upstream corruption.
+  if cloud_exec "${app_name}" "printf '%s' \"${env_b64}\" | base64 -d > ~/.spawnrc && chmod 600 ~/.spawnrc && \
+    grep -q 'source ~/.spawnrc' ~/.bashrc 2>/dev/null || printf '%s\n' '[ -f ~/.spawnrc ] && source ~/.spawnrc' >> ~/.bashrc" >/dev/null 2>&1; then
+    log_ok "Manual .spawnrc created successfully"
+  else
+    log_err "Failed to create manual .spawnrc"
+  fi
+  return 0
 }

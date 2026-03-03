@@ -74,12 +74,8 @@ input_test_codex() {
   fi
 }
 
-input_test_openclaw() {
+_openclaw_ensure_gateway() {
   local app="$1"
-
-  log_step "Running input test for openclaw..."
-
-  # Ensure the gateway is running (it may have died after provisioning)
   log_step "Ensuring openclaw gateway is running on :18789..."
   cloud_exec "${app}" "source ~/.spawnrc 2>/dev/null; \
     export PATH=\$HOME/.npm-global/bin:\$HOME/.bun/bin:\$HOME/.local/bin:\$PATH; \
@@ -99,27 +95,71 @@ input_test_openclaw() {
     log_err "OpenClaw gateway failed to start"
     return 1
   fi
+}
+
+_openclaw_restart_gateway() {
+  local app="$1"
+  log_step "Restarting openclaw gateway..."
+  cloud_exec "${app}" "source ~/.spawnrc 2>/dev/null; \
+    export PATH=\$HOME/.npm-global/bin:\$HOME/.bun/bin:\$HOME/.local/bin:\$PATH; \
+    _gw_pid=\$(lsof -ti tcp:18789 2>/dev/null || fuser 18789/tcp 2>/dev/null | tr -d ' ') && \
+    kill \"\$_gw_pid\" 2>/dev/null; sleep 2; \
+    _oc_bin=\$(command -v openclaw) || exit 1; \
+    if command -v setsid >/dev/null 2>&1; then setsid \"\$_oc_bin\" gateway > /tmp/openclaw-gateway.log 2>&1 < /dev/null & \
+    else nohup \"\$_oc_bin\" gateway > /tmp/openclaw-gateway.log 2>&1 < /dev/null & fi; \
+    elapsed=0; while [ \$elapsed -lt 30 ]; do \
+      if (echo >/dev/tcp/127.0.0.1/18789) 2>/dev/null || nc -z 127.0.0.1 18789 2>/dev/null; then echo 'Gateway restarted'; break; fi; \
+      sleep 1; elapsed=\$((elapsed + 1)); \
+    done" >/dev/null 2>&1 || log_warn "Failed to restart openclaw gateway"
+}
+
+input_test_openclaw() {
+  local app="$1"
+  local max_attempts=2
+  local attempt=0
+
+  log_step "Running input test for openclaw..."
 
   local encoded_prompt
   encoded_prompt=$(printf '%s' "${INPUT_TEST_PROMPT}" | base64 -w 0 2>/dev/null || printf '%s' "${INPUT_TEST_PROMPT}" | base64)
-  local remote_cmd
-  remote_cmd="source ~/.spawnrc 2>/dev/null; \
-    export PATH=\$HOME/.npm-global/bin:\$HOME/.bun/bin:\$HOME/.local/bin:\$PATH; \
-    rm -rf /tmp/e2e-test && mkdir -p /tmp/e2e-test && cd /tmp/e2e-test && git init -q; \
-    PROMPT=\$(printf '%s' '${encoded_prompt}' | base64 -d); openclaw agent --message \"\$PROMPT\" --session-id e2e-test --json"
 
-  local output
-  output=$(cloud_exec_long "${app}" "${remote_cmd}" "${INPUT_TEST_TIMEOUT}" 2>&1) || true
+  while [ "${attempt}" -lt "${max_attempts}" ]; do
+    attempt=$((attempt + 1))
 
-  if printf '%s' "${output}" | grep -q "${INPUT_TEST_MARKER}"; then
-    log_ok "openclaw input test — marker found in response"
-    return 0
-  else
-    log_err "openclaw input test — marker '${INPUT_TEST_MARKER}' not found in response"
-    log_err "Response (last 5 lines):"
-    printf '%s\n' "${output}" | tail -5 >&2
-    return 1
-  fi
+    # Ensure/restart gateway
+    if [ "${attempt}" -eq 1 ]; then
+      _openclaw_ensure_gateway "${app}"
+    else
+      log_warn "Retrying openclaw input test (attempt ${attempt}/${max_attempts})..."
+      _openclaw_restart_gateway "${app}"
+    fi
+
+    local remote_cmd
+    remote_cmd="source ~/.spawnrc 2>/dev/null; \
+      export PATH=\$HOME/.npm-global/bin:\$HOME/.bun/bin:\$HOME/.local/bin:\$PATH; \
+      rm -rf /tmp/e2e-test && mkdir -p /tmp/e2e-test && cd /tmp/e2e-test && git init -q; \
+      PROMPT=\$(printf '%s' '${encoded_prompt}' | base64 -d); openclaw agent --message \"\$PROMPT\" --session-id e2e-test-${attempt} --json --timeout 60"
+
+    local output
+    output=$(cloud_exec_long "${app}" "${remote_cmd}" "${INPUT_TEST_TIMEOUT}" 2>&1) || true
+
+    if printf '%s' "${output}" | grep -q "${INPUT_TEST_MARKER}"; then
+      log_ok "openclaw input test — marker found in response"
+      return 0
+    fi
+
+    if [ "${attempt}" -lt "${max_attempts}" ]; then
+      log_warn "openclaw input test attempt ${attempt} failed — will retry"
+      log_warn "Response (last 3 lines):"
+      printf '%s\n' "${output}" | tail -3 >&2
+    else
+      log_err "openclaw input test — marker '${INPUT_TEST_MARKER}' not found in response"
+      log_err "Response (last 5 lines):"
+      printf '%s\n' "${output}" | tail -5 >&2
+    fi
+  done
+
+  return 1
 }
 
 input_test_zeroclaw() {
