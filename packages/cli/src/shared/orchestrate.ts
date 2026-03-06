@@ -6,6 +6,7 @@ import type { AgentConfig } from "./agents";
 
 import { generateSpawnId, saveSpawnRecord } from "../history.js";
 import { offerGithubAuth, wrapSshCall } from "./agent-setup";
+import { tryTarballInstall } from "./agent-tarball";
 import { generateEnvConfig } from "./agents";
 import { getModelIdInteractive, getOrPromptApiKey } from "./oauth";
 import { logInfo, logStep, logWarn, prepareStdinForHandoff, withRetry } from "./ui";
@@ -49,7 +50,17 @@ function wrapWithRestartLoop(cmd: string): string {
   ].join("\n");
 }
 
-export async function runOrchestration(cloud: CloudOrchestrator, agent: AgentConfig, agentName: string): Promise<void> {
+/** Options for runOrchestration (used in tests to inject mock dependencies). */
+export interface OrchestrationOptions {
+  tryTarball?: (runner: CloudRunner, agentName: string) => Promise<boolean>;
+}
+
+export async function runOrchestration(
+  cloud: CloudOrchestrator,
+  agent: AgentConfig,
+  agentName: string,
+  options?: OrchestrationOptions,
+): Promise<void> {
   logInfo(`${agent.name} on ${cloud.cloudLabel}`);
   process.stderr.write("\n");
 
@@ -101,8 +112,15 @@ export async function runOrchestration(cloud: CloudOrchestrator, agent: AgentCon
 
   const envContent = generateEnvConfig(agent.envVars(apiKey));
 
-  // 8. Install agent
-  await agent.install();
+  // 8. Install agent (try tarball first on cloud VMs)
+  let installedFromTarball = false;
+  if (cloud.cloudName !== "local" && !agent.skipTarball) {
+    const tarball = options?.tryTarball ?? tryTarballInstall;
+    installedFromTarball = await tarball(cloud.runner, agentName);
+  }
+  if (!installedFromTarball) {
+    await agent.install();
+  }
 
   // 9. Inject environment variables via .spawnrc
   logStep("Setting up environment variables...");

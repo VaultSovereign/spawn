@@ -1,0 +1,147 @@
+name: Agent Tarballs
+
+on:
+  schedule:
+    # 5 AM UTC daily
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: "Single agent to build (leave empty for all)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      agents: ${{ steps.set-matrix.outputs.agents }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: set-matrix
+        env:
+          AGENT_INPUT: ${{ inputs.agent }}
+        run: |
+          if [ -n "${AGENT_INPUT:-}" ]; then
+            # Validate: agent name must be alphanumeric/hyphens only
+            if ! printf '%s' "${AGENT_INPUT}" | grep -qE '^[a-z][a-z0-9-]*$'; then
+              echo "::error::Invalid agent name: ${AGENT_INPUT}"
+              exit 1
+            fi
+            echo "agents=$(jq -cn --arg a "${AGENT_INPUT}" '[$a]')" >> "$GITHUB_OUTPUT"
+          else
+            echo "agents=$(jq -c 'keys' packer/agents.json)" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 3
+      fail-fast: false
+      matrix:
+        agent: ${{ fromJson(needs.matrix.outputs.agents) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install agent under /root
+        env:
+          AGENT_NAME: ${{ matrix.agent }}
+        run: |
+          set -eo pipefail
+
+          # Validate agent exists in agents.json (prevents path traversal / injection)
+          if ! jq -e --arg a "${AGENT_NAME}" 'has($a)' packer/agents.json > /dev/null; then
+            echo "::error::Unknown agent: ${AGENT_NAME}"
+            exit 1
+          fi
+
+          # Read the agent's tier from packer/agents.json
+          TIER=$(jq -r --arg a "${AGENT_NAME}" '.[$a].tier' packer/agents.json)
+          echo "==> Agent: ${AGENT_NAME}, Tier: ${TIER}"
+
+          # Run tier script (sets up node/bun/etc. under /root)
+          if [ -f "packer/scripts/tier-${TIER}.sh" ]; then
+            echo "==> Running tier script: tier-${TIER}.sh"
+            sudo HOME=/root bash "packer/scripts/tier-${TIER}.sh"
+          fi
+
+          # TRUST BOUNDARY: packer/agents.json is version-controlled and requires
+          # PR review to modify. Install commands are executed via bash -c, so any
+          # change to agents.json MUST be reviewed carefully for command safety.
+          #
+          # Security layers:
+          #   1. agents.json changes require PR review (branch protection)
+          #   2. curl/wget targets validated against domain allowlist
+          #   3. Suspicious command patterns rejected via blocklist
+          #   4. Runs in ephemeral GitHub Actions container (destroyed after each run)
+          echo "==> Installing agent..."
+
+          # Allowed domains for curl/wget downloads (official agent vendor domains)
+          ALLOWED_DOMAINS="claude.ai|opencode.ai|raw.githubusercontent.com|registry.npmjs.org|crates.io|github.com"
+
+          CMD_COUNT=$(jq -r --arg a "${AGENT_NAME}" '.[$a].install | length' packer/agents.json)
+          i=0
+          while [ "$i" -lt "$CMD_COUNT" ]; do
+            cmd=$(jq -r --arg a "${AGENT_NAME}" --argjson i "$i" '.[$a].install[$i]' packer/agents.json)
+
+            # Safety layer 1: reject suspicious command patterns
+            if printf '%s' "${cmd}" | grep -qE '(mktemp|eval |base64 -d|/dev/tcp|nc -[elp]|python[23]? -c|perl -e|ruby -e|\bdd\b|>[[:space:]]*/dev/|rm -rf)'; then
+              echo "::error::Suspicious install command rejected: ${cmd}"
+              exit 1
+            fi
+
+            # Safety layer 2: validate curl/wget URLs against domain allowlist
+            if printf '%s' "${cmd}" | grep -qE '(curl|wget)'; then
+              urls=$(printf '%s' "${cmd}" | grep -oE 'https?://[^[:space:]"|'\'']+' || true)
+              for url in ${urls}; do
+                domain=$(printf '%s' "${url}" | sed -E 's|^https?://([^/]+).*|\1|')
+                if ! printf '%s' "${domain}" | grep -qE "^(${ALLOWED_DOMAINS})$"; then
+                  echo "::error::curl/wget to unapproved domain '${domain}' in: ${cmd}"
+                  exit 1
+                fi
+              done
+            fi
+
+            echo "==> Running: ${cmd}"
+            sudo HOME=/root bash -c "${cmd}"
+            i=$((i + 1))
+          done
+
+      - name: Capture agent files into tarball
+        env:
+          AGENT_NAME: ${{ matrix.agent }}
+        run: |
+          set -eo pipefail
+          sudo bash packer/scripts/capture-agent.sh "${AGENT_NAME}"
+
+      - name: Create or update GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_NAME: ${{ matrix.agent }}
+        run: |
+          set -eo pipefail
+          TAG="agent-${AGENT_NAME}-latest"
+          DATE=$(date -u +%Y%m%d)
+          TARBALL="spawn-agent-${AGENT_NAME}-x86_64-${DATE}.tar.gz"
+
+          # Move tarball to expected name
+          mv "/tmp/spawn-agent-${AGENT_NAME}.tar.gz" "${TARBALL}"
+
+          # Delete existing release if present (rolling release)
+          gh release delete "${TAG}" --yes 2>/dev/null || true
+
+          # Create fresh release with the tarball
+          gh release create "${TAG}" "${TARBALL}" \
+            --title "Agent tarball: ${AGENT_NAME} (${DATE})" \
+            --notes "Pre-built tarball for \`${AGENT_NAME}\` agent. Auto-generated nightly." \
+            --prerelease

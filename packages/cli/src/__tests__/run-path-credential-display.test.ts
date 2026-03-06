@@ -1,6 +1,6 @@
 import type { Manifest } from "../manifest";
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mockClackPrompts } from "./test-helpers";
 
 /**
@@ -125,8 +125,11 @@ const { prioritizeCloudsByCredentials, isRetryableExitCode } = await import("../
 
 describe("prioritizeCloudsByCredentials", () => {
   const savedEnv: Record<string, string | undefined> = {};
+  let whichSpy: ReturnType<typeof spyOn>;
 
   beforeEach(() => {
+    // Mock Bun.which to prevent CLI detection from interfering with credential tests
+    whichSpy = spyOn(Bun, "which").mockReturnValue(null);
     // Save and clear credential env vars
     for (const v of [
       "HCLOUD_TOKEN",
@@ -140,6 +143,7 @@ describe("prioritizeCloudsByCredentials", () => {
   });
 
   afterEach(() => {
+    whichSpy.mockRestore();
     // Restore env vars
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) {

@@ -13,7 +13,7 @@
 import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { isNumber } from "../shared/type-guards.js";
 
-// ── Mock only oauth (needed to avoid interactive prompts) ─────────────
+// ── Mock oauth + tarball (needed to avoid interactive prompts / network) ──
 
 const mockGetOrPromptApiKey = mock(() => Promise.resolve("sk-or-v1-test-key"));
 const mockGetModelIdInteractive = mock(() => Promise.resolve("openrouter/auto"));
@@ -28,7 +28,9 @@ mock.module("../shared/oauth", () => ({
 const { runOrchestration } = await import("../shared/orchestrate");
 
 import type { AgentConfig } from "../shared/agents";
-import type { CloudOrchestrator } from "../shared/orchestrate";
+import type { CloudOrchestrator, OrchestrationOptions } from "../shared/orchestrate";
+
+const mockTryTarballInstall = mock(() => Promise.resolve(false));
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -66,10 +68,20 @@ function createMockAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
   };
 }
 
+/** Default options that inject the mock tarball function. */
+const defaultOpts: OrchestrationOptions = {
+  tryTarball: mockTryTarballInstall,
+};
+
 /** Run orchestration and catch the process.exit throw. */
-async function runOrchestrationSafe(cloud: CloudOrchestrator, agent: AgentConfig, agentName: string): Promise<void> {
+async function runOrchestrationSafe(
+  cloud: CloudOrchestrator,
+  agent: AgentConfig,
+  agentName: string,
+  opts: OrchestrationOptions = defaultOpts,
+): Promise<void> {
   try {
-    await runOrchestration(cloud, agent, agentName);
+    await runOrchestration(cloud, agent, agentName, opts);
   } catch (e) {
     // process.exit mock throws to stop execution — that's expected
     if (e instanceof Error && e.message.startsWith("__EXIT_")) {
@@ -99,6 +111,8 @@ describe("runOrchestration", () => {
     mockGetOrPromptApiKey.mockImplementation(() => Promise.resolve("sk-or-v1-test-key"));
     mockGetModelIdInteractive.mockClear();
     mockGetModelIdInteractive.mockImplementation(() => Promise.resolve("openrouter/auto"));
+    mockTryTarballInstall.mockClear();
+    mockTryTarballInstall.mockImplementation(() => Promise.resolve(false));
   });
 
   it("calls all cloud lifecycle methods in correct order", async () => {
@@ -418,6 +432,80 @@ describe("runOrchestration", () => {
 
     await runOrchestrationSafe(cloud, agent, "testagent");
 
+    expect(install).toHaveBeenCalledTimes(1);
+    stderrSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  // ── Tarball install ──────────────────────────────────────────────────
+
+  it("attempts tarball install before agent.install on non-local clouds", async () => {
+    const install = mock(() => Promise.resolve());
+    const cloud = createMockCloud({
+      cloudName: "digitalocean",
+    });
+    const agent = createMockAgent({
+      install,
+    });
+
+    await runOrchestrationSafe(cloud, agent, "testagent");
+
+    expect(mockTryTarballInstall).toHaveBeenCalledTimes(1);
+    expect(mockTryTarballInstall).toHaveBeenCalledWith(cloud.runner, "testagent");
+    // Tarball failed (returned false) so agent.install should be called
+    expect(install).toHaveBeenCalledTimes(1);
+    stderrSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  it("skips agent.install when tarball succeeds", async () => {
+    mockTryTarballInstall.mockImplementation(() => Promise.resolve(true));
+    const install = mock(() => Promise.resolve());
+    const cloud = createMockCloud({
+      cloudName: "hetzner",
+    });
+    const agent = createMockAgent({
+      install,
+    });
+
+    await runOrchestrationSafe(cloud, agent, "testagent");
+
+    expect(mockTryTarballInstall).toHaveBeenCalledTimes(1);
+    expect(install).not.toHaveBeenCalled();
+    stderrSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  it("skips tarball install for local cloud", async () => {
+    const install = mock(() => Promise.resolve());
+    const cloud = createMockCloud({
+      cloudName: "local",
+    });
+    const agent = createMockAgent({
+      install,
+    });
+
+    await runOrchestrationSafe(cloud, agent, "testagent");
+
+    expect(mockTryTarballInstall).not.toHaveBeenCalled();
+    expect(install).toHaveBeenCalledTimes(1);
+    stderrSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  it("skips tarball install when agent has skipTarball set", async () => {
+    const install = mock(() => Promise.resolve());
+    const cloud = createMockCloud({
+      cloudName: "digitalocean",
+    });
+    const agent = createMockAgent({
+      install,
+      skipTarball: true,
+    });
+
+    await runOrchestrationSafe(cloud, agent, "testagent");
+
+    expect(mockTryTarballInstall).not.toHaveBeenCalled();
     expect(install).toHaveBeenCalledTimes(1);
     stderrSpy.mockRestore();
     exitSpy.mockRestore();

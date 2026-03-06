@@ -34,6 +34,8 @@ export interface AgentConfig {
   /** If true, Docker + image pull are added to cloud-init for faster extraction.
    *  Only worth it for agents with slow installs (e.g. Rust compilation). */
   slowInstall?: boolean;
+  /** Skip tarball install attempt (e.g., already using snapshot). */
+  skipTarball?: boolean;
 }
 
 // ─── Shared Helpers ──────────────────────────────────────────────────────────
