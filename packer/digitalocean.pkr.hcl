@@ -34,8 +34,8 @@ locals {
 source "digitalocean" "spawn" {
   api_token    = var.do_api_token
   image        = "ubuntu-24-04-x64"
-  region       = "nyc3"
-  size         = "s-2vcpu-4gb"
+  region       = "sfo3"
+  size         = "s-2vcpu-2gb"
   ssh_username = "root"
 
   snapshot_name = local.image_name
@@ -75,6 +75,7 @@ build {
     environment_vars = [
       "HOME=/root",
       "DEBIAN_FRONTEND=noninteractive",
+      "PATH=/root/.local/bin:/root/.bun/bin:/root/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     ]
   }
 
@@ -84,6 +85,10 @@ build {
       "echo 'spawn-${var.agent_name}' > /root/.spawn-snapshot",
       "date -u '+%Y-%m-%dT%H:%M:%SZ' >> /root/.spawn-snapshot",
       "touch /root/.cloud-init-complete",
+    ]
+    environment_vars = [
+      "HOME=/root",
+      "PATH=/root/.local/bin:/root/.bun/bin:/root/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     ]
   }
 
