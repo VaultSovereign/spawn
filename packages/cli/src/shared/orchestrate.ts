@@ -79,7 +79,11 @@ export async function runOrchestration(
     }
   }
 
-  // 2. Pre-provision hooks
+  // 2. Get API key (immediately after cloud auth — before any other prompts
+  //    so the "opening browser" message leads directly to OpenRouter OAuth)
+  const apiKey = await getOrPromptApiKey(agentName, cloud.cloudName);
+
+  // 3. Pre-provision hooks (e.g., GitHub auth prompt — non-fatal)
   if (agent.preProvision) {
     try {
       await agent.preProvision();
@@ -87,9 +91,6 @@ export async function runOrchestration(
       // non-fatal
     }
   }
-
-  // 3. Get API key (before provisioning so user isn't waiting)
-  const apiKey = await getOrPromptApiKey(agentName, cloud.cloudName);
 
   // 4. Model ID (use agent default — no interactive prompt)
   const modelId = agent.modelDefault || process.env.MODEL_ID;

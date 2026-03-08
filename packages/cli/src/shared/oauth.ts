@@ -1,9 +1,12 @@
 // shared/oauth.ts — OpenRouter OAuth flow + API key management
 
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import * as v from "valibot";
 import { OAUTH_CODE_REGEX } from "./oauth-constants";
 import { parseJsonWith } from "./parse";
-import { logError, logInfo, logStep, logWarn, openBrowser, prompt } from "./ui";
+import { isString } from "./type-guards";
+import { getSpawnCloudConfigPath, logError, logInfo, logStep, logWarn, openBrowser, prompt } from "./ui";
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -211,6 +214,49 @@ async function tryOauthFlow(callbackPort = 5180, agentSlug?: string, cloudSlug?:
   }
 }
 
+// ─── API Key Persistence ─────────────────────────────────────────────────────
+
+/** Save OpenRouter API key to ~/.config/spawn/openrouter.json so it persists across runs. */
+async function saveOpenRouterKey(key: string): Promise<void> {
+  try {
+    const configPath = getSpawnCloudConfigPath("openrouter");
+    mkdirSync(dirname(configPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await Bun.write(
+      configPath,
+      JSON.stringify(
+        {
+          api_key: key,
+        },
+        null,
+        2,
+      ) + "\n",
+      {
+        mode: 0o600,
+      },
+    );
+  } catch {
+    // non-fatal — key still works in memory for this session
+  }
+}
+
+/** Load a previously saved OpenRouter API key from ~/.config/spawn/openrouter.json. */
+function loadSavedOpenRouterKey(): string | null {
+  try {
+    const configPath = getSpawnCloudConfigPath("openrouter");
+    const data = JSON.parse(readFileSync(configPath, "utf-8"));
+    const key = isString(data.api_key) ? data.api_key : "";
+    if (key && /^sk-or-v1-[a-f0-9]{64}$/.test(key)) {
+      return key;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Main API Key Acquisition ────────────────────────────────────────────────
 
 async function promptAndValidateApiKey(): Promise<string | null> {
@@ -249,12 +295,24 @@ export async function getOrPromptApiKey(agentSlug?: string, cloudSlug?: string):
     logWarn("Environment key failed validation, prompting for a new one...");
   }
 
-  // 2. Try OAuth + manual fallback (3 attempts)
+  // 2. Check saved key from previous session
+  const savedKey = loadSavedOpenRouterKey();
+  if (savedKey) {
+    logInfo("Using saved OpenRouter API key");
+    if (await verifyOpenrouterKey(savedKey)) {
+      process.env.OPENROUTER_API_KEY = savedKey;
+      return savedKey;
+    }
+    logWarn("Saved key failed validation, prompting for a new one...");
+  }
+
+  // 3. Try OAuth + manual fallback (3 attempts)
   for (let attempt = 1; attempt <= 3; attempt++) {
     // Try OAuth first
     const key = await tryOauthFlow(5180, agentSlug, cloudSlug);
     if (key && (await verifyOpenrouterKey(key))) {
       process.env.OPENROUTER_API_KEY = key;
+      await saveOpenRouterKey(key);
       return key;
     }
 
@@ -278,6 +336,7 @@ export async function getOrPromptApiKey(agentSlug?: string, cloudSlug?: string):
     const manualKey = await promptAndValidateApiKey();
     if (manualKey && (await verifyOpenrouterKey(manualKey))) {
       process.env.OPENROUTER_API_KEY = manualKey;
+      await saveOpenRouterKey(manualKey);
       return manualKey;
     }
   }

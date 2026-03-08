@@ -169,6 +169,31 @@ describe("runOrchestration", () => {
     exitSpy.mockRestore();
   });
 
+  it("obtains API key before preProvision (no surprise prompts after cloud auth)", async () => {
+    const callOrder: string[] = [];
+    mockGetOrPromptApiKey.mockImplementation(async () => {
+      callOrder.push("getApiKey");
+      return "sk-or-v1-test-key";
+    });
+    const cloud = createMockCloud({
+      authenticate: mock(async () => {
+        callOrder.push("authenticate");
+      }),
+    });
+    const agent = createMockAgent({
+      preProvision: mock(async () => {
+        callOrder.push("preProvision");
+      }),
+    });
+
+    await runOrchestrationSafe(cloud, agent, "testagent");
+
+    expect(callOrder.indexOf("authenticate")).toBeLessThan(callOrder.indexOf("getApiKey"));
+    expect(callOrder.indexOf("getApiKey")).toBeLessThan(callOrder.indexOf("preProvision"));
+    stderrSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
   it("passes API key to agent.envVars", async () => {
     const envVarsFn = mock((key: string) => [
       `OPENROUTER_API_KEY=${key}`,

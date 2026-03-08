@@ -6,7 +6,6 @@ import type { CloudOrchestrator } from "../shared/orchestrate";
 
 import { saveLaunchCmd } from "../history.js";
 import { runOrchestration } from "../shared/orchestrate";
-import { logStep } from "../shared/ui";
 import { agents, resolveAgent } from "./agents";
 import {
   checkAccountStatus,
@@ -49,12 +48,8 @@ async function main() {
     },
     async authenticate() {
       await promptSpawnName();
-      const usedBrowserAuth = await ensureDoToken();
+      await ensureDoToken();
       await ensureSshKey();
-      if (usedBrowserAuth) {
-        logStep("Next step: OpenRouter authentication (opening browser in 5s)...");
-        await new Promise((r) => setTimeout(r, 5000));
-      }
     },
     async checkAccountReady() {
       await checkAccountStatus();
