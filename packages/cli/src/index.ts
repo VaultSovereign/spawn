@@ -7,6 +7,8 @@ import {
   cmdAgentInfo,
   cmdAgentInteractive,
   cmdAgents,
+  cmdAttest,
+  cmdBundle,
   cmdCloudInfo,
   cmdClouds,
   cmdDelete,
@@ -22,7 +24,9 @@ import {
   cmdRun,
   cmdRunHeadless,
   cmdStatus,
+  cmdTrust,
   cmdUpdate,
+  cmdVerify,
   findClosestKeyByNameOrKey,
   isInteractiveTTY,
   loadManifestWithSpinner,
@@ -507,6 +511,23 @@ const FIX_COMMANDS = new Set([
   "refresh",
 ]);
 
+const VERIFY_COMMANDS = new Set([
+  "verify",
+]);
+
+const BUNDLE_COMMANDS = new Set([
+  "bundle",
+]);
+
+const ATTEST_COMMANDS = new Set([
+  "attest",
+  "sign",
+]);
+
+const TRUST_COMMANDS = new Set([
+  "trust",
+]);
+
 // status handled separately for --prune/--json flag parsing
 const STATUS_COMMANDS = new Set([
   "status",
@@ -720,6 +741,37 @@ async function dispatchCommand(
     await cmdFix(spawnId);
     return;
   }
+  if (VERIFY_COMMANDS.has(cmd)) {
+    if (hasTrailingHelpFlag(filteredArgs)) {
+      cmdHelp();
+      return;
+    }
+    const runId = filteredArgs[1] && !filteredArgs[1].startsWith("-") ? filteredArgs[1] : undefined;
+    await cmdVerify(runId);
+    return;
+  }
+  if (BUNDLE_COMMANDS.has(cmd)) {
+    if (hasTrailingHelpFlag(filteredArgs)) {
+      cmdHelp();
+      return;
+    }
+    const runId = filteredArgs[1] && !filteredArgs[1].startsWith("-") ? filteredArgs[1] : undefined;
+    await cmdBundle(runId);
+    return;
+  }
+  if (ATTEST_COMMANDS.has(cmd)) {
+    if (hasTrailingHelpFlag(filteredArgs)) {
+      cmdHelp();
+      return;
+    }
+    const runId = filteredArgs[1] && !filteredArgs[1].startsWith("-") ? filteredArgs[1] : undefined;
+    await cmdAttest(runId);
+    return;
+  }
+  if (TRUST_COMMANDS.has(cmd)) {
+    await cmdTrust(filteredArgs.slice(1));
+    return;
+  }
   if (STATUS_COMMANDS.has(cmd)) {
     await dispatchStatusCommand(filteredArgs);
     return;
@@ -849,6 +901,7 @@ async function main(): Promise<void> {
   filteredArgs.splice(0, filteredArgs.length, ...configFilteredArgs);
 
   if (configPath) {
+    process.env.SPAWN_CONFIG_PATH = configPath;
     const { loadSpawnConfig } = await import("./shared/spawn-config.js");
     const configResult = tryCatch(() => loadSpawnConfig(configPath));
     if (!configResult.ok) {

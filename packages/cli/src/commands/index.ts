@@ -1,5 +1,9 @@
 // Barrel re-export — all command modules re-exported from this index.
 
+// attest.ts — cmdAttest
+export { cmdAttest } from "./attest.js";
+// bundle.ts — cmdBundle
+export { cmdBundle } from "./bundle.js";
 // delete.ts — cmdDelete
 export { cmdDelete } from "./delete.js";
 // feedback.ts — cmdFeedback
@@ -66,5 +70,9 @@ export {
 } from "./shared.js";
 // status.ts — cmdStatus
 export { cmdStatus } from "./status.js";
+// trust.ts — cmdTrust
+export { cmdTrust } from "./trust.js";
 // update.ts — cmdUpdate
 export { cmdUpdate } from "./update.js";
+// verify.ts — cmdVerify
+export { cmdVerify } from "./verify.js";

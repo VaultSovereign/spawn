@@ -33,7 +33,9 @@ export function getSpawnDir(): string {
   // /tmp/../../root/.spawn to /root/.spawn, potentially allowing unauthorized
   // file writes to sensitive directories.
   const userHome = getUserHome();
-  if (!resolved.startsWith(userHome + "/") && resolved !== userHome) {
+  const normalizedResolved = resolved.replaceAll("\\", "/");
+  const normalizedHome = userHome.replaceAll("\\", "/");
+  if (!normalizedResolved.startsWith(normalizedHome + "/") && normalizedResolved !== normalizedHome) {
     throw new Error("SPAWN_HOME must be within your home directory.\n" + `Got: ${resolved}\n` + `Home: ${userHome}`);
   }
 
@@ -43,6 +45,61 @@ export function getSpawnDir(): string {
 /** Path to the spawn history file. */
 export function getHistoryPath(): string {
   return join(getSpawnDir(), "history.json");
+}
+
+/** Path to the directory containing witnessed execution records. */
+export function getRunsDir(): string {
+  return join(getSpawnDir(), "runs");
+}
+
+/** Path to a specific witnessed execution directory. */
+export function getRunDir(runId: string): string {
+  return join(getRunsDir(), runId);
+}
+
+/** Path to the attestation metadata directory. */
+export function getAttestationDir(): string {
+  return join(getSpawnDir(), "attestation");
+}
+
+/** Path to the local signing key directory. */
+export function getAttestationKeysDir(): string {
+  return join(getAttestationDir(), "keys");
+}
+
+/** Path to the verifier public key directory used for cryptographic checks. */
+export function getAttestationVerifiersDir(): string {
+  return join(getAttestationDir(), "verifiers");
+}
+
+/** Path to the default signing private key. */
+export function getDefaultAttestationPrivateKeyPath(): string {
+  return join(getAttestationKeysDir(), "default-private.pem");
+}
+
+/** Path to the default signing public key. */
+export function getDefaultAttestationPublicKeyPath(): string {
+  return join(getAttestationKeysDir(), "default-public.pem");
+}
+
+/** Path to a verifier public key for the given key ID. */
+export function getAttestationVerifierKeyPath(keyId: string): string {
+  return join(getAttestationVerifiersDir(), `${keyId}.pem`);
+}
+
+/** Backward-compatible alias for verifier key lookup. */
+export function getTrustedAttestationKeyPath(keyId: string): string {
+  return getAttestationVerifierKeyPath(keyId);
+}
+
+/** Path to the trust policy directory. */
+export function getTrustDir(): string {
+  return join(getSpawnDir(), "trust");
+}
+
+/** Path to the local trust store file. */
+export function getTrustStorePath(): string {
+  return join(getTrustDir(), "trust-store.json");
 }
 
 /**

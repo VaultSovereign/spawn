@@ -5,6 +5,9 @@ Spawn executes operational runbooks on disposable infrastructure.
 A runbook packages setup, execution, and teardown into a reproducible command that runs locally or on a cloud provider.
 
 Spawn provisions the environment, runs the runbook, and returns the resulting session or artifacts.
+Each run can also be exported as a portable proof bundle that can be verified independently of the original machine.
+Runs can also be attested with detached signatures over the canonical record digest.
+Trusted signer acceptance is managed separately through a local trust store and verifier policy.
 
 ALPHA software — behavior and compatibility may change.
 
@@ -62,6 +65,11 @@ Spawn will:
 | spawn delete                 | Destroy a spawned machine               |
 | spawn status                 | Show running environments               |
 | spawn fix                    | Re-run setup on an existing environment |
+| spawn bundle `<run-id>`      | Export a portable proof bundle          |
+| spawn attest `<run-id>`      | Add detached attestation over a record  |
+| spawn trust list             | List locally accepted signers           |
+| spawn trust add `<key-id>`   | Accept a signer in the local trust store |
+| spawn verify `<source>`      | Verify a run directory or proof bundle  |
 | spawn help                   | Show CLI help                           |
 | spawn version                | Show CLI version                        |
 

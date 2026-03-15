@@ -37,6 +37,13 @@ function getHelpUsageSection(): string {
   spawn status --prune               Remove gone servers from history
   spawn fix                          Re-run agent setup on an existing VM (re-inject credentials, reinstall)
   spawn fix <spawn-id>               Fix a specific spawn by name or ID
+  spawn bundle <run-id>              Export a portable proof bundle
+  spawn attest <run-id>              Add detached attestation over a run record digest
+  spawn trust list                   List locally accepted signers
+  spawn trust add <key-id>           Accept a signer in the local trust store
+  spawn trust remove <key-id>        Remove a signer from the local trust store
+  spawn verify <run-id>              Verify a witnessed execution bundle
+  spawn verify <bundle-path>         Verify an exported proof bundle
   spawn last                         Instantly rerun the most recent spawn (alias: rerun)
   spawn matrix                       Full availability matrix (alias: m)
   spawn agents                       List all agents with descriptions
@@ -74,6 +81,13 @@ function getHelpExamplesSection(): string {
   spawn hetzner                      ${pc.dim("# Show which agents run on Hetzner")}
   spawn list                         ${pc.dim("# Browse history and pick one to rerun")}
   spawn list codex                   ${pc.dim("# Filter history by agent name")}
+  spawn bundle spn_abc123            ${pc.dim("# Export a portable proof bundle")}
+  spawn attest spn_abc123            ${pc.dim("# Add detached attestation to a run")}
+  spawn trust list                   ${pc.dim("# Show signer acceptance state")}
+  spawn trust add 2a41b6c0d9f1ab12   ${pc.dim("# Accept a signer locally")}
+  spawn verify spn_abc123            ${pc.dim("# Verify a recorded proof bundle")}
+  spawn verify ./spawn-proof-bundle.tar.gz
+                                     ${pc.dim("# Verify a portable proof bundle off-host")}
   spawn last                         ${pc.dim("# Instantly rerun the most recent spawn")}
   spawn matrix                       ${pc.dim("# See the full agent x cloud matrix")}`;
 }

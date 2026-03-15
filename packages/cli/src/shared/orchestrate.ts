@@ -1,6 +1,14 @@
 // shared/orchestrate.ts — Shared orchestration pipeline for deploying agents
 // Each cloud implements CloudOrchestrator and calls runOrchestration().
 
+import type {
+  AttestationPolicy,
+  RunStatus,
+  StepStatus,
+  TranscriptCaptureMode,
+  TranscriptPolicy,
+  TrustPolicy,
+} from "@openrouter/spawn-shared";
 import type { VMConnection } from "../history.js";
 import type { CloudRunner } from "./agent-setup";
 import type { AgentConfig } from "./agents";
@@ -13,6 +21,7 @@ import { generateSpawnId, saveLaunchCmd, saveMetadata, saveSpawnRecord } from ".
 import { offerGithubAuth, wrapSshCall } from "./agent-setup";
 import { tryTarballInstall } from "./agent-tarball";
 import { generateEnvConfig } from "./agents";
+import { createExecutionWitness } from "./execution-witness";
 import { getOrPromptApiKey } from "./oauth";
 import { getSpawnPreferencesPath } from "./paths";
 import { asyncTryCatch, asyncTryCatchIf, isFileError, isOperationalError, tryCatchIf } from "./result.js";
@@ -104,261 +113,492 @@ function loadPreferredModel(agentName: string): string | null {
   return result.ok ? result.data : null;
 }
 
+function getWitnessEnvNames(cloudName: string, envPairs: string[]): string[] {
+  const cloudEnvByName: Record<string, string[]> = {
+    aws: [
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_DEFAULT_REGION",
+      "LIGHTSAIL_BUNDLE",
+    ],
+    digitalocean: [
+      "DO_API_TOKEN",
+      "DO_REGION",
+      "DO_DROPLET_SIZE",
+    ],
+    gcp: [
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "GCP_ZONE",
+      "GCP_MACHINE_TYPE",
+    ],
+    hetzner: [
+      "HCLOUD_TOKEN",
+      "HETZNER_LOCATION",
+      "HETZNER_SERVER_TYPE",
+    ],
+    local: [],
+    sprite: [
+      "SPRITE_TOKEN",
+    ],
+  };
+  const general = [
+    "OPENROUTER_API_KEY",
+    "MODEL_ID",
+    "SPAWN_NAME",
+    "SPAWN_CONFIG_PATH",
+    "SPAWN_ENABLED_STEPS",
+    "GITHUB_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+  ];
+  const agentEnvNames = envPairs.map((pair) => pair.split("=", 1)[0]).filter(Boolean);
+  return Array.from(
+    new Set([
+      ...general,
+      ...agentEnvNames,
+      ...(cloudEnvByName[cloudName] ?? []),
+    ]),
+  );
+}
+
+function buildSurvivingResources(cloudName: string, connection?: VMConnection): Array<Record<string, string>> {
+  if (!connection || cloudName === "local") {
+    return [];
+  }
+  const resource: Record<string, string> = {
+    kind: "server",
+    ip: connection.ip,
+    user: connection.user,
+  };
+  if (connection.server_id) {
+    resource.server_id = connection.server_id;
+  }
+  if (connection.server_name) {
+    resource.server_name = connection.server_name;
+  }
+  if (connection.cloud) {
+    resource.cloud = connection.cloud;
+  }
+  return [
+    resource,
+  ];
+}
+
+function statusFromError(err: unknown): RunStatus {
+  const message = getErrorMessage(err).toLowerCase();
+  if (message.includes("ctrl+c") || message.includes("sigint") || message.includes("interrupted")) {
+    return "aborted";
+  }
+  if (message.includes("timeout")) {
+    return "timeout";
+  }
+  return "failed";
+}
+
+function parseTranscriptPolicy(value: string | undefined): TranscriptPolicy {
+  if (value === "none" || value === "required") {
+    return value;
+  }
+  return "optional";
+}
+
+function parseCaptureMode(value: string | undefined): TranscriptCaptureMode {
+  if (value === "none" || value === "pty-recorded" || value === "fully-structured") {
+    return value;
+  }
+  return "best-effort";
+}
+
+function parseAttestationPolicy(value: string | undefined): AttestationPolicy {
+  if (value === "none" || value === "required") {
+    return value;
+  }
+  return "optional";
+}
+
+function parseTrustPolicy(value: string | undefined): TrustPolicy {
+  if (value === "trusted-required" || value === "allowed-set-required") {
+    return value;
+  }
+  return "any-valid";
+}
+
+function parseWitnessArtifacts(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 export async function runOrchestration(
   cloud: CloudOrchestrator,
   agent: AgentConfig,
   agentName: string,
   options?: OrchestrationOptions,
 ): Promise<void> {
+  if (process.env.HOME) {
+    process.env.HOME = process.env.HOME.replaceAll("\\", "/");
+  }
+  if (process.env.SPAWN_HOME) {
+    process.env.SPAWN_HOME = process.env.SPAWN_HOME.replaceAll("\\", "/");
+  }
+  const witness = createExecutionWitness({
+    runbook: agentName,
+    target: cloud.cloudName,
+    envVarNames: getWitnessEnvNames(cloud.cloudName, agent.envVars("REDACTED")),
+    witnessLevel: process.env.SPAWN_WITNESS_LEVEL,
+    expectedArtifacts: parseWitnessArtifacts(process.env.SPAWN_WITNESS_EXPECTED_ARTIFACTS),
+    requiredArtifacts: parseWitnessArtifacts(process.env.SPAWN_WITNESS_REQUIRED_ARTIFACTS),
+    transcriptPolicy: parseTranscriptPolicy(process.env.SPAWN_WITNESS_TRANSCRIPT_POLICY),
+    transcriptCaptureMode: parseCaptureMode(process.env.SPAWN_WITNESS_CAPTURE_MODE),
+    attestationPolicy: parseAttestationPolicy(process.env.SPAWN_WITNESS_ATTESTATION_POLICY),
+    trustPolicy: parseTrustPolicy(process.env.SPAWN_WITNESS_TRUST_POLICY),
+    trustedSigners: parseWitnessArtifacts(process.env.SPAWN_WITNESS_TRUSTED_SIGNERS),
+  });
+  witness.startOutputCapture();
+
+  const executeStep = async <T>(
+    name: string,
+    fn: () => Promise<T>,
+    opts: {
+      swallowError?: boolean;
+      statusOnError?: StepStatus;
+      exitCodeOnError?: number;
+    } = {},
+  ): Promise<T | undefined> => {
+    const handle = witness.beginStep(name);
+    const result = await asyncTryCatch(fn);
+    if (result.ok) {
+      witness.endStep(handle, "success", {
+        exitCode: 0,
+      });
+      return result.data;
+    }
+    witness.endStep(handle, opts.statusOnError ?? "failed", {
+      exitCode: opts.exitCodeOnError ?? 1,
+      error: getErrorMessage(result.error),
+    });
+    if (opts.swallowError) {
+      return undefined;
+    }
+    throw result.error;
+  };
+
   logInfo(`${agent.name} on ${cloud.cloudLabel}`);
   process.stderr.write("\n");
 
-  // 1. Authenticate with cloud provider
-  await cloud.authenticate();
-
-  // 1b. Pre-flight account readiness check (billing, email verification, etc.)
-  //     Uses try/catch (not guarded) because hooks can throw ANY provider-specific error.
-  if (cloud.checkAccountReady) {
-    const r = await asyncTryCatch(() => cloud.checkAccountReady!());
-    if (!r.ok) {
-      logWarn("Account readiness check failed — proceeding anyway");
-      logDebug(getErrorMessage(r.error));
-    }
-  }
-
-  // 2. Get API key (immediately after cloud auth — before any other prompts
-  //    so the "opening browser" message leads directly to OpenRouter OAuth)
-  const resolveApiKey = options?.getApiKey ?? getOrPromptApiKey;
-  const apiKey = await resolveApiKey(agentName, cloud.cloudName);
-
-  // 3. Pre-provision hooks (e.g., GitHub auth prompt — non-fatal)
-  //     Uses try/catch (not guarded) because hooks can throw ANY provider-specific error.
-  if (agent.preProvision) {
-    const r = await asyncTryCatch(() => agent.preProvision!());
-    if (!r.ok) {
-      logWarn("Pre-provision hook failed — continuing");
-      logDebug(getErrorMessage(r.error));
-    }
-  }
-
-  // 4. Model ID — priority: --model flag (MODEL_ID env) > preferences file > agent default
-  const rawModelId = process.env.MODEL_ID || loadPreferredModel(agentName) || agent.modelDefault;
-  const modelId = rawModelId && validateModelId(rawModelId) ? rawModelId : undefined;
-  if (rawModelId && !modelId) {
-    logWarn(`Ignoring invalid MODEL_ID: ${rawModelId}`);
-  }
-
-  // 5. Size/bundle selection
-  await cloud.promptSize();
-
-  // 6. Provision server
-  const spawnId = generateSpawnId();
-  const serverName = await cloud.getServerName();
-  const connection = await cloud.createServer(serverName);
-
-  // 6b. Record the spawn atomically with connection data
-  const spawnName = process.env.SPAWN_NAME_KEBAB || process.env.SPAWN_NAME || undefined;
-  saveSpawnRecord({
-    id: spawnId,
-    agent: agentName,
-    cloud: cloud.cloudName,
-    timestamp: new Date().toISOString(),
-    ...(spawnName
-      ? {
-          name: spawnName,
-        }
-      : {}),
-    connection,
-  });
-
-  // 7. Wait for readiness
-  await cloud.waitForReady();
-
-  const envContent = generateEnvConfig(agent.envVars(apiKey));
-
-  // 8. Install agent (skip entirely for snapshot boots, try tarball first on cloud VMs)
-  if (cloud.skipAgentInstall) {
-    logInfo("Snapshot boot — skipping agent install");
-  } else {
-    let installedFromTarball = false;
-    const betaFeatures = new Set((process.env.SPAWN_BETA ?? "").split(",").filter(Boolean));
-    if (cloud.cloudName !== "local" && !agent.skipTarball && betaFeatures.has("tarball")) {
-      const tarball = options?.tryTarball ?? tryTarballInstall;
-      installedFromTarball = await tarball(cloud.runner, agentName);
-    }
-    if (!installedFromTarball) {
-      await agent.install();
-    }
-  }
-
-  // 9. Inject environment variables via .spawnrc
-  logStep("Setting up environment variables...");
-  const envB64 = Buffer.from(envContent).toString("base64");
-  const envResult = await asyncTryCatch(() =>
-    withRetry(
-      "env setup",
-      () =>
-        wrapSshCall(
-          cloud.runner.runServer(
-            `printf '%s' '${envB64}' | base64 -d > ~/.spawnrc && chmod 600 ~/.spawnrc; ` +
-              "for _rc in ~/.bashrc ~/.profile ~/.bash_profile ~/.zshrc; do " +
-              `grep -q 'source ~/.spawnrc' "$_rc" 2>/dev/null || echo '[ -f ~/.spawnrc ] && source ~/.spawnrc' >> "$_rc"; ` +
-              "done",
-          ),
-        ),
-      2,
-      5,
-    ),
-  );
-  if (!envResult.ok) {
-    logWarn("Environment setup had errors");
-  }
-
-  // 10. Parse enabled setup steps from env (set by --steps, --config, or interactive prompts)
-  let enabledSteps: Set<string> | undefined;
-  const stepsEnv = process.env.SPAWN_ENABLED_STEPS;
-  if (stepsEnv !== undefined) {
-    const stepNames = stepsEnv.split(",").filter(Boolean);
-    // Validate step names and warn about unknowns
-    if (stepNames.length > 0) {
-      const { validateStepNames } = await import("./agents.js");
-      const { valid, invalid } = validateStepNames(agentName, stepNames);
-      if (invalid.length > 0) {
-        logWarn(`Unknown setup steps ignored: ${invalid.join(", ")}`);
-      }
-      enabledSteps = new Set(valid);
-    } else {
-      // --steps "" → disable all optional steps
-      enabledSteps = new Set();
-    }
-  }
-
-  // 10b. Agent-specific configuration
-  if (agent.configure) {
-    const configResult = await asyncTryCatch(() =>
-      withRetry("agent config", () => wrapSshCall(agent.configure!(apiKey, modelId, enabledSteps)), 2, 5),
-    );
-    if (!configResult.ok) {
-      logWarn("Agent configuration failed (continuing with defaults)");
-    }
-  }
-
-  // GitHub CLI setup (skip if user unchecked in setup options)
-  if (!enabledSteps || enabledSteps.has("github")) {
-    await offerGithubAuth(cloud.runner);
-  }
-
-  // 11. Pre-launch hooks (e.g. OpenClaw gateway)
-  if (agent.preLaunch) {
-    await agent.preLaunch();
-  }
-
-  // 11b. SSH tunnel for web dashboard
   let tunnelHandle: SshTunnelHandle | undefined;
-  if (agent.tunnel) {
-    if (cloud.getConnectionInfo) {
-      // SSH-based cloud: tunnel the remote port to localhost
-      const tunnelResult = await asyncTryCatchIf(isOperationalError, async () => {
-        const conn = cloud.getConnectionInfo();
-        const keys = await ensureSshKeys();
-        tunnelHandle = await startSshTunnel({
-          host: conn.host,
-          user: conn.user,
-          remotePort: agent.tunnel.remotePort,
-          sshKeyOpts: getSshKeyOpts(keys),
-        });
-        if (agent.tunnel.browserUrl) {
-          const url = agent.tunnel.browserUrl(tunnelHandle.localPort);
-          if (url) {
-            openBrowser(url);
-          }
-        }
-      });
-      if (!tunnelResult.ok) {
-        logWarn("Web dashboard tunnel failed — use the TUI instead");
+  let cleanupAttempted = false;
+  let cleanupSucceeded: boolean | null = null;
+  let connection: VMConnection | undefined;
+  let spawnId = "";
+
+  const orchestrationResult = await asyncTryCatch(async () => {
+    await executeStep("authenticate-cloud", () => cloud.authenticate());
+
+    if (cloud.checkAccountReady) {
+      const r = await asyncTryCatch(() => executeStep("check-account-ready", () => cloud.checkAccountReady!()));
+      if (!r.ok) {
+        logWarn("Account readiness check failed — proceeding anyway");
+        logDebug(getErrorMessage(r.error));
       }
-    } else if (cloud.cloudName === "local") {
-      // Local: no tunnel needed, open browser directly
-      if (agent.tunnel.browserUrl) {
+    }
+
+    const resolveApiKey = options?.getApiKey ?? getOrPromptApiKey;
+    const apiKey = await executeStep("obtain-api-key", () => resolveApiKey(agentName, cloud.cloudName));
+    if (!apiKey) {
+      throw new Error("Failed to obtain API key");
+    }
+
+    if (agent.preProvision) {
+      const r = await asyncTryCatch(() =>
+        executeStep("pre-provision", () => agent.preProvision!(), {
+          swallowError: true,
+          statusOnError: "warning",
+        }),
+      );
+      if (!r.ok) {
+        logWarn("Pre-provision hook failed — continuing");
+        logDebug(getErrorMessage(r.error));
+      }
+    }
+
+    const rawModelId = process.env.MODEL_ID || loadPreferredModel(agentName) || agent.modelDefault;
+    const modelId = rawModelId && validateModelId(rawModelId) ? rawModelId : undefined;
+    if (rawModelId && !modelId) {
+      logWarn(`Ignoring invalid MODEL_ID: ${rawModelId}`);
+    }
+
+    await executeStep("select-size", () => cloud.promptSize());
+
+    spawnId = generateSpawnId();
+    const serverName = await executeStep("resolve-server-name", () => cloud.getServerName());
+    if (!serverName) {
+      throw new Error("Failed to resolve server name");
+    }
+    connection = await executeStep("create-server", () => cloud.createServer(serverName));
+    if (!connection) {
+      throw new Error("Failed to create server");
+    }
+
+    const spawnName = process.env.SPAWN_NAME_KEBAB || process.env.SPAWN_NAME || undefined;
+    saveSpawnRecord({
+      id: spawnId,
+      agent: agentName,
+      cloud: cloud.cloudName,
+      timestamp: new Date().toISOString(),
+      ...(spawnName
+        ? {
+            name: spawnName,
+          }
+        : {}),
+      connection,
+    });
+    saveMetadata(
+      {
+        execution_run_id: witness.runId,
+      },
+      spawnId,
+    );
+    witness.updateEnvironment({
+      public_ip: connection.ip,
+      connection_user: connection.user,
+      ...(connection.server_id
+        ? {
+            server_id: connection.server_id,
+          }
+        : {}),
+      ...(connection.server_name
+        ? {
+            server_name: connection.server_name,
+          }
+        : {}),
+    });
+
+    await executeStep("wait-for-ready", () => cloud.waitForReady());
+
+    const envContent = generateEnvConfig(agent.envVars(apiKey));
+
+    if (cloud.skipAgentInstall) {
+      const handle = witness.beginStep("install-agent");
+      logInfo("Snapshot boot — skipping agent install");
+      witness.endStep(handle, "skipped", {
+        exitCode: 0,
+      });
+    } else {
+      let installedFromTarball = false;
+      const betaFeatures = new Set((process.env.SPAWN_BETA ?? "").split(",").filter(Boolean));
+      if (cloud.cloudName !== "local" && !agent.skipTarball && betaFeatures.has("tarball")) {
+        const tarball = options?.tryTarball ?? tryTarballInstall;
+        const tarballResult = await executeStep("install-agent-tarball", () => tarball(cloud.runner, agentName));
+        installedFromTarball = tarballResult === true;
+      }
+      if (!installedFromTarball) {
+        await executeStep("install-agent", () => agent.install());
+      }
+    }
+
+    logStep("Setting up environment variables...");
+    const envB64 = Buffer.from(envContent).toString("base64");
+    const envResult = await asyncTryCatch(() =>
+      executeStep("inject-environment", () =>
+        withRetry(
+          "env setup",
+          () =>
+            wrapSshCall(
+              cloud.runner.runServer(
+                `printf '%s' '${envB64}' | base64 -d > ~/.spawnrc && chmod 600 ~/.spawnrc; ` +
+                  "for _rc in ~/.bashrc ~/.profile ~/.bash_profile ~/.zshrc; do " +
+                  `grep -q 'source ~/.spawnrc' "$_rc" 2>/dev/null || echo '[ -f ~/.spawnrc ] && source ~/.spawnrc' >> "$_rc"; ` +
+                  "done",
+              ),
+            ),
+          2,
+          5,
+        ),
+      ),
+    );
+    if (!envResult.ok) {
+      logWarn("Environment setup had errors");
+    }
+
+    let enabledSteps: Set<string> | undefined;
+    const stepsEnv = process.env.SPAWN_ENABLED_STEPS;
+    if (stepsEnv !== undefined) {
+      const stepNames = stepsEnv.split(",").filter(Boolean);
+      if (stepNames.length > 0) {
+        const { validateStepNames } = await import("./agents.js");
+        const { valid, invalid } = validateStepNames(agentName, stepNames);
+        if (invalid.length > 0) {
+          logWarn(`Unknown setup steps ignored: ${invalid.join(", ")}`);
+        }
+        enabledSteps = new Set(valid);
+      } else {
+        enabledSteps = new Set();
+      }
+    }
+
+    if (agent.configure) {
+      const configResult = await asyncTryCatch(() =>
+        executeStep("configure-agent", () =>
+          withRetry("agent config", () => wrapSshCall(agent.configure!(apiKey, modelId, enabledSteps)), 2, 5),
+        ),
+      );
+      if (!configResult.ok) {
+        logWarn("Agent configuration failed (continuing with defaults)");
+      }
+    }
+
+    if (!enabledSteps || enabledSteps.has("github")) {
+      await executeStep("setup-github", () => offerGithubAuth(cloud.runner), {
+        swallowError: true,
+        statusOnError: "warning",
+      });
+    }
+
+    if (agent.preLaunch) {
+      await executeStep("pre-launch", () => agent.preLaunch());
+    }
+
+    if (agent.tunnel) {
+      if (cloud.getConnectionInfo) {
+        const tunnelResult = await asyncTryCatchIf(isOperationalError, () =>
+          executeStep("start-tunnel", async () => {
+            const conn = cloud.getConnectionInfo!();
+            const keys = await ensureSshKeys();
+            tunnelHandle = await startSshTunnel({
+              host: conn.host,
+              user: conn.user,
+              remotePort: agent.tunnel!.remotePort,
+              sshKeyOpts: getSshKeyOpts(keys),
+            });
+            if (agent.tunnel?.browserUrl) {
+              const url = agent.tunnel.browserUrl(tunnelHandle.localPort);
+              if (url) {
+                openBrowser(url);
+              }
+            }
+          }),
+        );
+        if (!tunnelResult.ok) {
+          logWarn("Web dashboard tunnel failed — use the TUI instead");
+        }
+      } else if (cloud.cloudName === "local" && agent.tunnel.browserUrl) {
+        const handle = witness.beginStep("start-tunnel");
         const url = agent.tunnel.browserUrl(agent.tunnel.remotePort);
         if (url) {
           openBrowser(url);
         }
+        witness.endStep(handle, "success", {
+          exitCode: 0,
+        });
       }
+
+      const tunnelMeta: Record<string, string> = {
+        tunnel_remote_port: String(agent.tunnel.remotePort),
+      };
+      if (agent.tunnel.browserUrl) {
+        const templateUrl = agent.tunnel.browserUrl(0);
+        if (templateUrl) {
+          tunnelMeta.tunnel_browser_url_template = templateUrl.replace("localhost:0", "localhost:__PORT__");
+        }
+      }
+      saveMetadata(tunnelMeta, spawnId);
     }
 
-    // Persist tunnel metadata so `spawn ls` → "Enter agent" can re-establish the tunnel.
-    // Store the remote port and browser URL template (with PORT placeholder) so the
-    // tunnel can be reconstructed with whatever local port is available on reconnect.
-    const tunnelMeta: Record<string, string> = {
-      tunnel_remote_port: String(agent.tunnel.remotePort),
-    };
-    if (agent.tunnel.browserUrl) {
-      // Use port 0 as a placeholder — on reconnect we replace it with the actual local port
-      const templateUrl = agent.tunnel.browserUrl(0);
-      if (templateUrl) {
-        tunnelMeta.tunnel_browser_url_template = templateUrl.replace("localhost:0", "localhost:__PORT__");
-      }
+    const ocPath = "export PATH=$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.local/bin:$PATH";
+    if (enabledSteps?.has("telegram")) {
+      await executeStep("telegram-pairing", async () => {
+        logStep("Telegram pairing...");
+        logInfo("To pair your Telegram account:");
+        logInfo("  1. Open Telegram on your phone");
+        logInfo("  2. Search for the bot you created with @BotFather");
+        logInfo('  3. Send it any message (e.g. "hello")');
+        logInfo("  4. The bot will reply with a pairing code");
+        logInfo("  5. Enter the code below");
+        process.stderr.write("\n");
+        const pairingCode = (await prompt("Telegram pairing code: ")).trim();
+        if (pairingCode) {
+          const escaped = shellQuote(pairingCode);
+          const result = await asyncTryCatchIf(isOperationalError, () =>
+            cloud.runner.runServer(
+              `source ~/.spawnrc 2>/dev/null; ${ocPath}; openclaw pairing approve telegram ${escaped}`,
+            ),
+          );
+          if (result.ok) {
+            logInfo("Telegram paired successfully");
+          } else {
+            logWarn("Pairing failed — you can pair later via: openclaw pairing approve telegram <CODE>");
+          }
+        } else {
+          logInfo("No code entered — pair later via: openclaw pairing approve telegram <CODE>");
+        }
+      });
     }
-    saveMetadata(tunnelMeta, spawnId);
-  }
 
-  // 11c. Channel setup (runs after gateway is up)
-  const ocPath = "export PATH=$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.local/bin:$PATH";
+    if (agent.preLaunchMsg) {
+      const handle = witness.beginStep("pre-launch-message");
+      process.stderr.write("\n");
+      logInfo(`Tip: ${agent.preLaunchMsg}`);
+      witness.endStep(handle, "success", {
+        exitCode: 0,
+      });
+    }
 
-  if (enabledSteps?.has("telegram")) {
-    logStep("Telegram pairing...");
-    logInfo("To pair your Telegram account:");
-    logInfo("  1. Open Telegram on your phone");
-    logInfo("  2. Search for the bot you created with @BotFather");
-    logInfo('  3. Send it any message (e.g. "hello")');
-    logInfo("  4. The bot will reply with a pairing code");
-    logInfo("  5. Enter the code below");
+    logInfo(`${agent.name} is ready`);
     process.stderr.write("\n");
-    const pairingCode = (await prompt("Telegram pairing code: ")).trim();
-    if (pairingCode) {
-      const escaped = shellQuote(pairingCode);
-      const result = await asyncTryCatchIf(isOperationalError, () =>
-        cloud.runner.runServer(
-          `source ~/.spawnrc 2>/dev/null; ${ocPath}; openclaw pairing approve telegram ${escaped}`,
-        ),
-      );
-      if (result.ok) {
-        logInfo("Telegram paired successfully");
-      } else {
-        logWarn("Pairing failed — you can pair later via: openclaw pairing approve telegram <CODE>");
-      }
-    } else {
-      logInfo("No code entered — pair later via: openclaw pairing approve telegram <CODE>");
-    }
-  }
-
-  // 11d. Agent-specific pre-launch tip (e.g. channel setup ordering hint)
-  if (agent.preLaunchMsg) {
+    logInfo(`${cloud.cloudLabel} setup completed successfully!`);
     process.stderr.write("\n");
-    logInfo(`Tip: ${agent.preLaunchMsg}`);
+    logStep("Starting agent...");
+
+    prepareStdinForHandoff();
+
+    const launchCmd = agent.launchCmd();
+    saveLaunchCmd(launchCmd, spawnId);
+
+    const sessionCmd = cloud.cloudName === "local" ? launchCmd : wrapWithRestartLoop(launchCmd);
+    const sessionHandle = witness.beginStep("interactive-session");
+    const exitCode = await cloud.interactiveSession(sessionCmd);
+    witness.endStep(sessionHandle, exitCode === 0 ? "success" : "failed", {
+      exitCode,
+    });
+
+    return exitCode;
+  });
+
+  if (!orchestrationResult.ok) {
+    if (tunnelHandle) {
+      cleanupAttempted = true;
+      tunnelHandle.stop();
+      cleanupSucceeded = true;
+    }
+    witness.finalize({
+      status: statusFromError(orchestrationResult.error),
+      finalExitCode: 1,
+      cleanupAttempted,
+      cleanupSucceeded,
+      survivingResources: buildSurvivingResources(cloud.cloudName, connection),
+    });
+    witness.stopOutputCapture();
+    throw orchestrationResult.error;
   }
 
-  // 12. Launch interactive session
-  logInfo(`${agent.name} is ready`);
-  process.stderr.write("\n");
-  logInfo(`${cloud.cloudLabel} setup completed successfully!`);
-  process.stderr.write("\n");
-  logStep("Starting agent...");
-
-  // Clean up stdin state accumulated during provisioning (readline, @clack/prompts
-  // raw mode, keypress listeners) so Bun.spawn gets a pristine FD handoff
-  prepareStdinForHandoff();
-
-  const launchCmd = agent.launchCmd();
-  saveLaunchCmd(launchCmd, spawnId);
-
-  // Wrap in restart loop for cloud VMs — not for local execution
-  const sessionCmd = cloud.cloudName === "local" ? launchCmd : wrapWithRestartLoop(launchCmd);
-  const exitCode = await cloud.interactiveSession(sessionCmd);
-
+  const exitCode = orchestrationResult.data;
   if (tunnelHandle) {
+    cleanupAttempted = true;
     tunnelHandle.stop();
+    cleanupSucceeded = true;
   }
+
+  witness.finalize({
+    status: exitCode === 0 ? "success" : "failed",
+    finalExitCode: exitCode,
+    cleanupAttempted,
+    cleanupSucceeded,
+    survivingResources: buildSurvivingResources(cloud.cloudName, connection),
+  });
+  witness.stopOutputCapture();
   process.exit(exitCode);
 }

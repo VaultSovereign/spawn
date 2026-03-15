@@ -167,6 +167,26 @@ function buildPromptLines(prompt: string): string[] {
   return lines;
 }
 
+function applyWitnessManifestEnv(agentDef: Manifest["agents"][string]): void {
+  const witness = agentDef.witness;
+  process.env.SPAWN_WITNESS_TRANSCRIPT_POLICY = witness?.transcript_policy ?? "optional";
+  process.env.SPAWN_WITNESS_CAPTURE_MODE = witness?.capture_mode ?? "best-effort";
+  process.env.SPAWN_WITNESS_ATTESTATION_POLICY = witness?.attestation_policy ?? "optional";
+  process.env.SPAWN_WITNESS_TRUST_POLICY = witness?.trust_policy ?? "any-valid";
+  process.env.SPAWN_WITNESS_REQUIRED_ARTIFACTS = (witness?.required_artifacts ?? []).join(",");
+  process.env.SPAWN_WITNESS_EXPECTED_ARTIFACTS = (
+    witness?.expected_artifacts ??
+    agentDef.expected_artifacts ??
+    []
+  ).join(",");
+  process.env.SPAWN_WITNESS_TRUSTED_SIGNERS = (witness?.trusted_signers ?? []).join(",");
+  if (agentDef.witness_level) {
+    process.env.SPAWN_WITNESS_LEVEL = agentDef.witness_level;
+  } else {
+    delete process.env.SPAWN_WITNESS_LEVEL;
+  }
+}
+
 export function showDryRunPreview(manifest: Manifest, agent: string, cloud: string, prompt?: string): void {
   p.log.info(pc.bold("Dry run -- no resources will be provisioned\n"));
 
@@ -793,6 +813,8 @@ export async function cmdRunHeadless(agent: string, cloud: string, opts: Headles
     );
   }
 
+  applyWitnessManifestEnv(manifest.agents[resolvedAgent]);
+
   // Check credentials upfront
   const cloudAuth = manifest.clouds[resolvedCloud].auth;
   if (cloudAuth.toLowerCase() !== "none") {
@@ -962,6 +984,7 @@ export async function cmdRun(
   const cloudName = manifest.clouds[cloud].name;
   const suffix = prompt ? " with prompt..." : "...";
   p.log.step(`Launching ${pc.bold(agentName)} on ${pc.bold(cloudName)}${suffix}`);
+  applyWitnessManifestEnv(manifest.agents[agent]);
 
   await execScript(cloud, agent, prompt, getAuthHint(manifest, cloud), manifest.clouds[cloud].url, debug, spawnName);
 }

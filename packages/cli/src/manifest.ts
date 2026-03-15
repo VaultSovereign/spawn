@@ -1,3 +1,5 @@
+import type { AttestationPolicy, TranscriptCaptureMode, TranscriptPolicy, TrustPolicy } from "@openrouter/spawn-shared";
+
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getErrorMessage, isPlainObject } from "@openrouter/spawn-shared";
@@ -43,6 +45,19 @@ export interface AgentDef {
   category?: string;
   tagline?: string;
   tags?: string[];
+  expected_artifacts?: string[];
+  required_env?: string[];
+  cleanup_mode?: string;
+  witness_level?: string;
+  witness?: {
+    transcript_policy?: TranscriptPolicy;
+    capture_mode?: TranscriptCaptureMode;
+    attestation_policy?: AttestationPolicy;
+    trust_policy?: TrustPolicy;
+    required_artifacts?: string[];
+    expected_artifacts?: string[];
+    trusted_signers?: string[];
+  };
 }
 
 export interface CloudDef {
