@@ -1,319 +1,215 @@
 # Spawn
 
-Launch any AI agent on any cloud with a single command. Coding agents, research agents, self-hosted AI tools — Spawn deploys them all. All models powered by [OpenRouter](https://openrouter.ai). (ALPHA software, use at your own risk!)
+Spawn executes operational runbooks on disposable infrastructure.
 
-**8 agents. 6 clouds. 48 working combinations. Zero config.**
+A runbook packages setup, execution, and teardown into a reproducible command that runs locally or on a cloud provider.
 
-## Install
+Spawn provisions the environment, runs the runbook, and returns the resulting session or artifacts.
 
-**macOS / Linux — and Windows users inside a WSL2 terminal (Ubuntu, Debian, etc.):**
-```bash
+ALPHA software — behavior and compatibility may change.
+
+---
+
+# Install
+
+macOS / Linux (Windows via WSL2):
+
+```
 curl -fsSL https://openrouter.ai/labs/spawn/cli/install.sh | bash
 ```
 
-**Windows PowerShell (outside WSL):**
-```powershell
+Windows PowerShell:
+
+```
 irm https://openrouter.ai/labs/spawn/cli/install.ps1 | iex
 ```
 
-## Usage
+---
 
-```bash
-spawn                         # Interactive picker
-spawn <agent> <cloud>         # Launch directly
-spawn matrix                  # Show the full agent x cloud matrix
+# Usage
+
+```
+spawn
+spawn <runbook> <target>
 ```
 
-### Examples
+Examples:
 
-```bash
-spawn                                    # Interactive picker
-spawn claude sprite                      # Claude Code on Sprite
-spawn codex hetzner                      # Codex CLI on Hetzner
-spawn claude sprite --prompt "Fix bugs"  # Non-interactive with prompt
-spawn codex sprite -p "Add tests"        # Short form
-spawn claude                             # Show clouds available for Claude
-spawn delete                             # Delete a running server
-spawn delete -c hetzner                  # Delete a server on Hetzner
+```
+spawn
+spawn claude sprite
+spawn codex hetzner
+spawn codex gcp -p "add tests"
+spawn delete
+spawn status
 ```
 
-### Commands
+Spawn will:
 
-| Command | Description |
-|---------|-------------|
-| `spawn` | Interactive agent + cloud picker |
-| `spawn <agent> <cloud>` | Launch agent on cloud directly |
-| `spawn <agent> <cloud> --dry-run` | Preview without provisioning |
-| `spawn <agent> <cloud> --zone <zone>` | Set zone/region for the cloud |
-| `spawn <agent> <cloud> --size <type>` | Set instance size/type for the cloud |
-| `spawn <agent> <cloud> -p "text"` | Non-interactive with prompt |
-| `spawn <agent> <cloud> --prompt-file f.txt` | Prompt from file |
-| `spawn <agent> <cloud> --headless` | Provision and exit (no interactive session) |
-| `spawn <agent> <cloud> --output json` | Headless mode with structured JSON on stdout |
-| `spawn <agent> <cloud> --model <id>` | Set the model ID (overrides agent default) |
-| `spawn <agent> <cloud> --config <file>` | Load options from a JSON config file |
-| `spawn <agent> <cloud> --steps <list>` | Comma-separated setup steps to enable |
-| `spawn <agent> <cloud> --custom` | Show interactive size/region pickers |
-| `spawn <agent>` | Show available clouds for an agent |
-| `spawn <cloud>` | Show available agents for a cloud |
-| `spawn matrix` | Full agent x cloud matrix |
-| `spawn list` | Browse and rerun previous spawns |
-| `spawn list <filter>` | Filter history by agent or cloud name |
-| `spawn list -a <agent>` | Filter history by agent |
-| `spawn list -c <cloud>` | Filter history by cloud |
-| `spawn list --clear` | Clear all spawn history |
-| `spawn fix` | Re-run agent setup on an existing VM (re-inject credentials, reinstall) |
-| `spawn fix <spawn-id>` | Fix a specific spawn by name or ID |
-| `spawn last` | Instantly rerun the most recent spawn |
-| `spawn agents` | List all agents with descriptions |
-| `spawn clouds` | List all cloud providers |
-| `spawn feedback "message"` | Send feedback to the Spawn team |
-| `spawn update` | Check for CLI updates |
-| `spawn delete` | Interactively select and destroy a cloud server |
-| `spawn delete -a <agent>` | Filter servers to delete by agent |
-| `spawn delete -c <cloud>` | Filter servers to delete by cloud |
-| `spawn status` | Show live state of cloud servers |
-| `spawn status -a <agent>` | Filter status by agent |
-| `spawn status -c <cloud>` | Filter status by cloud |
-| `spawn status --prune` | Remove gone servers from history |
-| `spawn help` | Show help message |
-| `spawn version` | Show version |
+1. Provision infrastructure if needed
+2. Execute the runbook
+3. Inject required credentials
+4. Start an interactive or headless session
 
-#### Config File
+---
 
-The `--config` flag loads options from a JSON file. CLI flags override config values.
+# Core Commands
 
-```json
+| Command                      | Description                             |
+| ---------------------------- | --------------------------------------- |
+| spawn                        | Interactive runbook selector            |
+| spawn `<runbook>` `<target>` | Execute a runbook on a target           |
+| spawn delete                 | Destroy a spawned machine               |
+| spawn status                 | Show running environments               |
+| spawn fix                    | Re-run setup on an existing environment |
+| spawn help                   | Show CLI help                           |
+| spawn version                | Show CLI version                        |
+
+---
+
+# Runbooks
+
+A runbook defines:
+
+* the environment to provision
+* setup steps
+* the executable workload
+* cleanup behavior
+
+Runbooks are implemented as scripts in:
+
+```
+sh/{target}/{runbook}.sh
+```
+
+Each script is responsible for preparing the environment and launching the workload.
+
+Examples of runbooks:
+
+* AI coding agents
+* research environments
+* automation tools
+* infrastructure diagnostics
+* operational procedures
+
+---
+
+# Configuration
+
+Runbooks can be parameterized using a JSON configuration file.
+
+Example:
+
+```
 {
   "model": "openai/gpt-5.3-codex",
-  "steps": ["github", "browser", "telegram"],
-  "name": "my-dev-box",
-  "setup": {
-    "telegram_bot_token": "123456:ABC-DEF...",
-    "github_token": "ghp_xxxx"
-  }
+  "steps": ["github"],
+  "name": "dev-box"
 }
 ```
 
-```bash
-spawn codex gcp --config setup.json --headless --output json
+Run with:
+
+```
+spawn codex gcp --config setup.json
 ```
 
-#### Setup Steps
+CLI flags override config values.
 
-Control which optional setup steps run with `--steps`:
+---
 
-```bash
-spawn openclaw gcp --steps github,browser     # Only GitHub + Chrome
-spawn claude gcp --steps ""                    # Skip all optional steps
+# Non-Interactive Mode
+
+Provide required credentials via environment variables:
+
 ```
-
-Available steps vary by agent:
-
-| Step | Agents | Description |
-|------|--------|-------------|
-| `github` | All | GitHub CLI + git identity |
-| `reuse-api-key` | All | Reuse saved OpenRouter key |
-| `browser` | openclaw | Chrome browser (~400 MB) |
-| `telegram` | openclaw | Telegram bot (set `TELEGRAM_BOT_TOKEN` for non-interactive) |
-| `whatsapp` | openclaw | WhatsApp linking (interactive QR scan, skipped in headless) |
-
-#### Beta Features
-
-Experimental features can be enabled with `--beta <feature>`. The flag is repeatable:
-
-```bash
-spawn claude gcp --beta tarball
-```
-
-| Feature | Description |
-|---------|-------------|
-| `tarball` | Use pre-built tarball for agent install (faster, skips live install) |
-| `images` | Use pre-built DigitalOcean marketplace images (faster boot, skips cloud-init) |
-
-### Without the CLI
-
-Every combination works as a one-liner — no install required:
-
-```bash
-bash <(curl -fsSL https://openrouter.ai/labs/spawn/{cloud}/{agent}.sh)
-```
-
-### Non-Interactive Mode
-
-Skip prompts by providing environment variables:
-
-```bash
-# OpenRouter API key (required for all agents)
 export OPENROUTER_API_KEY=sk-or-v1-xxxxx
-
-# Cloud-specific credentials (varies by provider)
-# Note: Sprite uses `sprite login` for authentication
-export HCLOUD_TOKEN=...           # For Hetzner
-export DO_API_TOKEN=...           # For DigitalOcean
-
-# Run non-interactively
-spawn claude hetzner
+spawn codex hetzner
 ```
 
-You can also use inline environment variables:
+Cloud provider credentials vary by provider.
 
-```bash
-OPENROUTER_API_KEY=sk-or-v1-xxxxx spawn claude sprite
+Example:
+
+```
+export HCLOUD_TOKEN=...
+export DO_API_TOKEN=...
 ```
 
-Get your OpenRouter API key at: https://openrouter.ai/settings/keys
+---
 
-For cloud-specific auth, see each cloud's README in this repository.
+# How Spawn Works
 
-## Troubleshooting
+Spawn orchestrates runbooks using three layers.
 
-### Installation issues
+**CLI**
 
-If spawn fails to install, try these steps:
+```
+packages/cli/
+```
 
-1. **Check bun version**: spawn requires bun >= 1.2.0
-   ```bash
-   bun --version
-   bun upgrade  # if needed
-   ```
+Responsible for provisioning infrastructure, validating configuration, and launching runbooks.
 
-2. **Manual installation**: If auto-install fails, install bun first
-   ```bash
-   curl -fsSL https://bun.sh/install | bash
-   source ~/.bashrc  # or ~/.zshrc for zsh
-   curl -fsSL https://openrouter.ai/labs/spawn/cli/install.sh | bash
-   ```
+**Runbook Scripts**
 
-3. **PATH issues**: If `spawn` command not found after install
-   ```bash
-   # Add to your shell config (~/.bashrc or ~/.zshrc)
-   export PATH="$HOME/.local/bin:$PATH"
-   ```
+```
+sh/{target}/{runbook}.sh
+```
 
-### Agent launch failures
+Shell scripts implementing environment setup and workload execution.
 
-If an agent fails to install or launch on a cloud:
+**Runbook Registry**
 
-1. **Check credentials**: Ensure cloud provider credentials are set
-   ```bash
-   # Example for Hetzner
-   export HCLOUD_TOKEN=your-token-here
-   spawn claude hetzner
-   ```
+```
+manifest.json
+```
 
-2. **Try a different cloud**: Some clouds may have temporary issues
-   ```bash
-   spawn <agent>  # Interactive picker to choose another cloud
-   ```
+Defines supported runbooks and targets.
 
-3. **Use --dry-run**: Preview what spawn will do before provisioning
-   ```bash
-   spawn claude hetzner --dry-run
-   ```
+---
 
-4. **Check cloud status**: Visit your cloud provider's status page
-   - Many failures are transient (network timeouts, package mirror issues)
-   - Retrying often succeeds
+# Development
 
-### Getting help
+Clone the repository:
 
-- **View command history**: `spawn list` shows all previous launches
-- **Rerun last session**: `spawn last` or `spawn rerun`
-- **Check version**: `spawn version` shows CLI version and cache status
-- **Update spawn**: `spawn update` checks for the latest version
-- **Report bugs**: Open an issue at https://github.com/OpenRouterTeam/spawn/issues
-
-## Matrix
-
-| | [Local Machine](sh/local/) | [Hetzner Cloud](sh/hetzner/) | [AWS Lightsail](sh/aws/) | [DigitalOcean](sh/digitalocean/) | [GCP Compute Engine](sh/gcp/) | [Sprite](sh/sprite/) |
-|---|---|---|---|---|---|---|
-| [**Claude Code**](https://claude.ai) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [**OpenClaw**](https://github.com/openclaw/openclaw) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [**ZeroClaw**](https://github.com/zeroclaw-labs/zeroclaw) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [**Codex CLI**](https://github.com/openai/codex) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [**OpenCode**](https://github.com/sst/opencode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [**Kilo Code**](https://github.com/Kilo-Org/kilocode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [**Hermes Agent**](https://github.com/NousResearch/hermes-agent) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| [**Junie**](https://www.jetbrains.com/junie/) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-
-### How it works
-
-Each cell in the matrix is a self-contained bash script that:
-
-1. Provisions a server on the cloud provider
-2. Installs the agent
-3. Injects your [OpenRouter](https://openrouter.ai) API key so every agent uses the same billing
-4. Drops you into an interactive session
-
-Scripts work standalone (`bash <(curl ...)`) or through the CLI.
-
-## Development
-
-```bash
-git clone https://github.com/OpenRouterTeam/spawn.git
+```
+git clone https://github.com/VaultSovereign/spawn.git
 cd spawn
-git config core.hooksPath .githooks
 ```
 
-### Structure
+Repository layout:
 
 ```
-sh/{cloud}/{agent}.sh     # Agent deployment script (thin bash → bun wrapper)
-packages/cli/             # TypeScript CLI — all provisioning logic (bun)
-manifest.json             # Source of truth for the matrix
+packages/cli/       TypeScript CLI
+sh/{target}/        Runbook scripts
+manifest.json       Runbook registry
 ```
 
-### Adding a new cloud
+To add a new runbook:
 
-1. Add cloud-specific TypeScript module in `packages/cli/src/{cloud}/`
-2. Add to `manifest.json`
-3. Implement agent scripts
-4. See [CLAUDE.md](CLAUDE.md) for full contributor guide
+1. Register it in `manifest.json`
+2. Implement the script under `sh/{target}/`
+3. Ensure required environment variables are injected by the CLI
 
-### Adding a new agent
+---
 
-1. Add to `manifest.json`
-2. Implement on 1+ cloud by adapting an existing agent script
-3. Must support OpenRouter via env var injection
+# Contributing
 
-## Contributing
+Contributions and bug reports are welcome.
 
-The easiest way to contribute is by testing and reporting issues. You don't need to write code.
+When reporting issues include:
 
-### Test a cloud provider
+* the exact command used
+* the runbook and target
+* error output
+* cloud provider used
 
-Pick any agent + cloud combination from the matrix and try it out:
+Open an issue at:
 
-```bash
-spawn claude hetzner      # or any combination
-```
+https://github.com/VaultSovereign/spawn/issues
 
-If something breaks, hangs, or behaves unexpectedly, open an issue using the [bug report template](https://github.com/OpenRouterTeam/spawn/issues/new?template=bug_report.yml). Include:
+---
 
-- The exact command you ran
-- The cloud provider and agent
-- What happened vs. what you expected
-- Any error output
+# License
 
-### Request a cloud or agent
-
-Want to see a specific cloud provider or agent supported? Use the dedicated templates:
-
-- [Request a cloud provider](https://github.com/OpenRouterTeam/spawn/issues/new?template=cloud_request.yml)
-- [Request an agent](https://github.com/OpenRouterTeam/spawn/issues/new?template=agent_request.yml)
-- [Request a CLI feature](https://github.com/OpenRouterTeam/spawn/issues/new?template=cli_feature_request.yml)
-
-Requests with real-world use cases get prioritized.
-
-### Report auth or credential issues
-
-Cloud provider APIs change frequently. If you hit authentication failures, expired tokens, or permission errors on a provider that previously worked, please report it — these are high-priority fixes.
-
-### Code contributions
-
-See [CLAUDE.md](CLAUDE.md) for the full contributor guide covering shell script rules, testing, and the shared library pattern.
-
-## License
-
-[Apache 2.0](LICENSE)
+Apache 2.0
